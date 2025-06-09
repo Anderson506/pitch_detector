@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Choir Pitch Buddy</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #container {
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 100%;
+            max-width: 600px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 25px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 20px;
+        }
+
+        .section:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: background-color 0.3s ease;
+            margin: 5px;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        #status, #detectedPitch, #targetNoteDisplay, #feedback {
+            font-size: 1.2em;
+            margin-top: 15px;
+            color: #555;
+        }
+
+        #detectedPitch {
+            font-size: 2em;
+            font-weight: bold;
+            color: #28a745; /* Green for detected */
+        }
+
+        #targetNoteDisplay {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #ffc107; /* Orange for target */
+        }
+
+        #feedback {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #dc3545; /* Red for incorrect */
+        }
+
+        #pitchMatchingControls select {
+            padding: 8px 12px;
+            font-size: 1em;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+            margin-right: 10px;
+        }
+        #accuracyScore {
+            font-weight: bold;
+            color: #007bff;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>Choir Class Tools</h1>
+
+        <div class="section" id="microphoneSetup">
+            <h2>Microphone Setup</h2>
+            <button id="startMicButton">Start Microphone</button>
+            <p id="status">Microphone not started.</p>
+        </div>
+
+        <div class="section" id="pitchMatchingTool">
+            <h2>Pitch Matching</h2>
+            <div id="pitchMatchingControls">
+                <label for="targetNoteSelect">Target Note:</label>
+                <select id="targetNoteSelect"></select>
+                <button id="playTargetNote">Play Target Note</button>
+            </div>
+            <p>Target: <span id="targetNoteDisplay">-</span></p>
+            <p>Your Pitch: <span id="detectedPitch">-</span></p>
+            <p id="feedback"></p>
+            <p>Accuracy: <span id="accuracyScore">-</span></p>
+        </div>
+
+        <div class="section" id="vocalRangeTool">
+            <h2>Vocal Range Finder</h2>
+            <button id="startRangeTest" disabled>Start Range Test</button>
+            <button id="stopRangeTest" disabled>Stop Range Test</button>
+            <p>Lowest Note: <span id="lowestNote">-</span></p>
+            <p>Highest Note: <span id="highestNote">-</span></p>
+            <p>Your Vocal Range: <span id="vocalRange">-</span></p>
+        </div>
+    </div>
+
+    <script>
+        let audioContext;
+        let analyserNode;
+        let microphoneStream;
+        let javascriptNode;
+        let oscillatorNode; // For playing target notes
+
+        // --- Pitch Detection Library (YIN implementation) ---
+        // Source: adapted from various YIN implementations, aiming for self-contained.
+        // YIN algorithm for fundamental frequency estimation.
+        class Yin {
+            constructor(sampleRate, bufferSize) {
+                this.sampleRate = sampleRate;
+                this.bufferSize = bufferSize;
+                this.yinBuffer = new Float32Array(bufferSize / 2); // Auto correlation buffer
+                this.threshold = 0.10; // Yin Threshold, lower value gives more accurate pitch
+                this.probability = 0.0; // Confidence of the detected pitch
+                this.cbs = new Float32Array(bufferSize / 2); // Cumulative Difference Function
+            }
+
+            // Detects pitch from audio data
+            getPitch(buffer) {
+                const bufferSize = this.bufferSize;
+                const sampleRate = this.sampleRate;
+                const yinBuffer = this.yinBuffer;
+                const threshold = this.threshold;
+                const cbs = this.cbs;
+
+                // Step 1: Calculate the difference function.
+                for (let t = 0; t < bufferSize / 2; t++) {
+                    yinBuffer[t] = 0;
+                    for (let i = 0; i < bufferSize / 2; i++) { // Optimization: only calculate up to bufferSize / 2
+                        const diff = buffer[i] - buffer[i + t];
+                        yinBuffer[t] += diff * diff;
+                    }
+                }
+
+                // Step 2: Calculate the cumulative mean normalized difference function (CMNDF).
+                cbs[0] = 1;
+                for (let t = 1; t < bufferSize / 2; t++) {
+                    cbs[t] = yinBuffer[t];
+                    // Cumulative sum for normalization
+                    let sum = 0;
+                    for (let i = 1; i <= t; i++) {
+                        sum += yinBuffer[i];
+                    }
+                    if (sum !== 0) {
+                        cbs[t] *= t / sum;
+                    } else {
+                        cbs[t] = 1; // Avoid division by zero
+                    }
+                }
+
+                // Step 3: Find the absolute threshold.
+                let t = 1;
+                while (t < bufferSize / 2 && cbs[t] < threshold) {
+                    t++;
+                }
+
+                // Step 4: Parabolic interpolation for more precise pitch.
+                if (t < bufferSize / 2) {
+                    let x0 = (t < 1) ? t : t - 1;
+                    let x2 = (t + 1 < bufferSize / 2) ? t + 1 : t;
+                    if (x0 === t) {
+                        if (cbs[t] > cbs[x2]) {
+                            x0 = t;
+                        } else {
+                            x0 = x2;
+                        }
+                    }
+                    if (x2 === t) {
+                        if (cbs[t] > cbs[x0]) {
+                            x2 = t;
+                        } else {
+                            x2 = x0;
+                        }
+                    }
+                    if (x0 === x2) { // Edge case: if x0, t, x2 are all same, no parabola
+                        this.probability = 1 - cbs[t];
+                        return sampleRate / t;
+                    }
+
+                    // Parabolic interpolation formula
+                    const denom = (cbs[x0] - 2 * cbs[t] + cbs[x2]);
+                    if (denom === 0) { // Avoid division by zero
+                        this.probability = 1 - cbs[t];
+                        return sampleRate / t;
+                    }
+
+                    const refinedT = t + 0.5 * (cbs[x0] - cbs[x2]) / denom;
+
+                    this.probability = 1 - cbs[Math.round(refinedT)]; // Confidence based on the interpolated value
+                    return sampleRate / refinedT;
+
+                } else {
+                    this.probability = 0; // No clear pitch detected below threshold
+                    return 0; // Return 0 if no pitch is found within the threshold
+                }
+            }
+        }
+
+
+        // --- Musical Note Data (A4 = 440Hz standard) ---
+        const A4 = 440;
+        const SEMITONE_RATIO = Math.pow(2, 1/12); // 12th root of 2
+
+        const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+        // Pre-calculate frequencies for notes within a reasonable vocal range (e.g., C2 to C6)
+        const noteFrequencies = {};
+        for (let octave = 2; octave <= 6; octave++) {
+            for (let i = 0; i < noteNames.length; i++) {
+                const noteIndex = i; // 0 for C, 1 for C#, ..., 9 for A, 10 for A#, 11 for B
+                let semitonesFromA4;
+                if (noteNames[noteIndex] === "A" && octave === 4) {
+                    semitonesFromA4 = 0; // A4 is our reference
+                } else {
+                    // Calculate semitones from A4 (which is index 9 in noteNames, octave 4)
+                    semitonesFromA4 = (octave - 4) * 12 + (noteIndex - 9);
+                }
+                const frequency = A4 * Math.pow(SEMITONE_RATIO, semitonesFromA4);
+                const noteName = `${noteNames[noteIndex]}${octave}`;
+                noteFrequencies[noteName] = frequency;
+            }
+        }
+
+        function getNoteFromFrequency(frequency) {
+            // Find the closest note to the given frequency
+            let closestNote = null;
+            let minDiff = Infinity;
+            let closestFrequency = 0;
+
+            for (const note in noteFrequencies) {
+                const freq = noteFrequencies[note];
+                const diff = Math.abs(frequency - freq);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestNote = note;
+                    closestFrequency = freq;
+                }
+            }
+
+            // Calculate cents deviation
+            let cents = 0;
+            if (closestNote && closestFrequency > 0) { // Ensure closestFrequency is not zero to avoid log(0)
+                cents = 1200 * Math.log2(frequency / closestFrequency); // 1200 cents per octave (100 per semitone)
+            }
+
+            return { note: closestNote, cents: cents, closestFreq: closestFrequency };
+        }
+
+        // --- DOM Elements ---
+        const startMicButton = document.getElementById('startMicButton');
+        const statusDisplay = document.getElementById('status');
+        const detectedPitchDisplay = document.getElementById('detectedPitch');
+        const targetNoteSelect = document.getElementById('targetNoteSelect');
+        const playTargetNoteButton = document.getElementById('playTargetNote');
+        const targetNoteDisplay = document.getElementById('targetNoteDisplay');
+        const feedbackDisplay = document.getElementById('feedback');
+        const accuracyScoreDisplay = document.getElementById('accuracyScore');
+
+        const startRangeTestButton = document.getElementById('startRangeTest');
+        const stopRangeTestButton = document.getElementById('stopRangeTest');
+        const lowestNoteDisplay = document.getElementById('lowestNote');
+        const highestNoteDisplay = document.getElementById('highestNote');
+        const vocalRangeDisplay = document.getElementById('vocalRange');
+
+        // --- Pitch Matching Variables ---
+        let currentTargetFrequency = 0;
+        let currentTargetNote = '';
+        let pitchesDetectedCents = []; // Store cents deviation for accuracy calculation
+
+        // --- Vocal Range Variables ---
+        let isRangeTestActive = false;
+        let minDetectedFrequency = Infinity;
+        let maxDetectedFrequency = 0;
+
+        let yinDetector; // Instance of our Yin pitch detector
+
+        // --- Populate Target Note Select ---
+        function populateTargetNoteSelect() {
+            // Clear existing options first
+            targetNoteSelect.innerHTML = '';
+
+            const sortedNotes = Object.keys(noteFrequencies).sort((a, b) => {
+                const [noteA, octaveA] = [a.slice(0, -1), parseInt(a.slice(-1))];
+                const [noteB, octaveB] = [b.slice(0, -1), parseInt(b.slice(-1))];
+
+                if (octaveA !== octaveB) return octaveA - octaveB;
+                return noteNames.indexOf(noteA) - noteNames.indexOf(noteB);
+            });
+
+            sortedNotes.forEach(note => {
+                const option = document.createElement('option');
+                option.value = noteFrequencies[note];
+                option.textContent = note;
+                targetNoteSelect.appendChild(option);
+            });
+            // Set initial target note
+            targetNoteSelect.value = noteFrequencies['A4']; // Default to A4
+            currentTargetFrequency = parseFloat(targetNoteSelect.value);
+            currentTargetNote = targetNoteSelect.options[targetNoteSelect.selectedIndex].textContent;
+            targetNoteDisplay.textContent = currentTargetNote;
+        }
+
+        // --- Start Microphone Function ---
+        startMicButton.addEventListener('click', async () => {
+            try {
+                if (audioContext && audioContext.state === 'running') {
+                    // Already running, stop it first
+                    if (microphoneStream) {
+                        microphoneStream.getTracks().forEach(track => track.stop());
+                    }
+                    if (javascriptNode) javascriptNode.disconnect();
+                    if (analyserNode) analyserNode.disconnect();
+                    if (oscillatorNode) oscillatorNode.stop();
+                    audioContext.close(); // Close the context to reset
+                    statusDisplay.textContent = 'Microphone stopped.';
+                    startMicButton.textContent = 'Start Microphone';
+                    startRangeTestButton.disabled = true;
+                    stopRangeTestButton.disabled = true;
+                    detectedPitchDisplay.textContent = '-';
+                    accuracyScoreDisplay.textContent = '-';
+                    feedbackDisplay.textContent = '';
+                    lowestNoteDisplay.textContent = '-';
+                    highestNoteDisplay.textContent = '-';
+                    vocalRangeDisplay.textContent = '-';
+                    return;
+                }
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                // We'll use a larger buffer size for YIN for better accuracy, typically 2048 or 4096
+                const bufferSize = 2048; // Common buffer size for ScriptProcessorNode
+
+                analyserNode = audioContext.createAnalyser();
+                analyserNode.fftSize = bufferSize; // FFT size should be at least bufferSize
+                analyserNode.minDecibels = -100;
+                analyserNode.maxDecibels = -10;
+                analyserNode.smoothingTimeConstant = 0.85;
+
+                javascriptNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
+                yinDetector = new Yin(audioContext.sampleRate, bufferSize);
+
+                javascriptNode.onaudioprocess = function(event) {
+                    const audioData = event.inputBuffer.getChannelData(0);
+                    const detectedPitch = yinDetector.getPitch(audioData);
+                    const probability = yinDetector.probability; // Get confidence from Yin
+
+                    // Only update if a pitch is detected with high enough confidence
+                    if (detectedPitch > 0 && probability > 0.9) { // Adjust confidence threshold as needed
+                        const freq = detectedPitch;
+                        const noteInfo = getNoteFromFrequency(freq);
+
+                        // Filter out pitches that are clearly noise (e.g., too low or too high for voice)
+                        if (freq >= 60 && freq <= 1000) { // Approximate human vocal range
+                            detectedPitchDisplay.textContent = `${noteInfo.note} (${freq.toFixed(2)} Hz)`;
+
+                            // Pitch Matching Logic
+                            if (currentTargetFrequency > 0) {
+                                const centsDiff = noteInfo.cents;
+
+                                // Store cents deviation for accuracy calculation
+                                pitchesDetectedCents.push(Math.abs(centsDiff));
+                                // Keep a reasonable number of recent pitches for moving average
+                                if (pitchesDetectedCents.length > 60) { // Approx 1 second of data if processing 60 times/sec
+                                    pitchesDetectedCents.shift();
+                                }
+
+                                // Calculate average accuracy over recent pitches
+                                const averageCentsDiff = pitchesDetectedCents.reduce((sum, val) => sum + val, 0) / pitchesDetectedCents.length;
+                                // Convert cents diff to a 0-100% accuracy score (0 cents diff = 100% accurate, 50 cents = 0% accurate relative to semitone)
+                                // A student is "perfectly" in tune if within +/- 5 cents, good within +/- 25 cents.
+                                // Let's define 50 cents (half semitone) as 0% accuracy
+                                const accuracy = Math.max(0, 100 - (Math.abs(averageCentsDiff) / 50) * 100);
+
+                                accuracyScoreDisplay.textContent = `${accuracy.toFixed(1)}%`;
+
+                                if (Math.abs(centsDiff) < 15) { // Within +/- 15 cents
+                                    feedbackDisplay.textContent = 'In Tune!';
+                                    feedbackDisplay.style.color = '#28a745';
+                                } else if (centsDiff > 15) {
+                                    feedbackDisplay.textContent = 'Too Sharp!';
+                                    feedbackDisplay.style.color = '#dc3545';
+                                } else { // centsDiff < -15
+                                    feedbackDisplay.textContent = 'Too Flat!';
+                                    feedbackDisplay.style.color = '#dc3545';
+                                }
+                            } else {
+                                feedbackDisplay.textContent = '';
+                                accuracyScoreDisplay.textContent = '-';
+                            }
+
+                            // Vocal Range Logic
+                            if (isRangeTestActive) {
+                                if (freq < minDetectedFrequency && freq > 20) { // Ignore very low noise
+                                    minDetectedFrequency = freq;
+                                    lowestNoteDisplay.textContent = getNoteFromFrequency(minDetectedFrequency).note;
+                                }
+                                if (freq > maxDetectedFrequency && freq < 2000) { // Ignore very high noise
+                                    maxDetectedFrequency = freq;
+                                    highestNoteDisplay.textContent = getNoteFromFrequency(maxDetectedFrequency).note;
+                                }
+                                if (minDetectedFrequency !== Infinity && maxDetectedFrequency !== 0) {
+                                    vocalRangeDisplay.textContent = `${getNoteFromFrequency(minDetectedFrequency).note} - ${getNoteFromFrequency(maxDetectedFrequency).note}`;
+                                }
+                            }
+                        } else { // Pitch out of human vocal range or too low confidence
+                             detectedPitchDisplay.textContent = '-';
+                             feedbackDisplay.textContent = '';
+                             accuracyScoreDisplay.textContent = '-';
+                        }
+                    } else { // No significant pitch detected
+                        detectedPitchDisplay.textContent = '-';
+                        feedbackDisplay.textContent = '';
+                        accuracyScoreDisplay.textContent = '-';
+                    }
+                };
+
+                // Get microphone access
+                microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const mediaStreamSource = audioContext.createMediaStreamSource(microphoneStream);
+
+                // Connect nodes
+                mediaStreamSource.connect(analyserNode);
+                analyserNode.connect(javascriptNode);
+                javascriptNode.connect(audioContext.destination); // Connect to speakers (optional)
+
+                statusDisplay.textContent = 'Microphone active!';
+                startMicButton.textContent = 'Stop Microphone';
+                startRangeTestButton.disabled = false;
+                populateTargetNoteSelect();
+
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                statusDisplay.textContent = `Error: ${err.message}. Please allow microphone access.`;
+                startMicButton.textContent = 'Start Microphone';
+            }
+        });
+
+        // --- Target Note Playback ---
+        playTargetNoteButton.addEventListener('click', () => {
+            if (!audioContext || audioContext.state === 'suspended') {
+                 // Resume context if it was suspended (e.g., by browser policies)
+                audioContext.resume().then(() => {
+                    playSelectedTargetNote();
+                });
+            } else {
+                playSelectedTargetNote();
+            }
+        });
+
+        function playSelectedTargetNote() {
+            if (oscillatorNode) {
+                oscillatorNode.stop();
+                oscillatorNode.disconnect();
+            }
+
+            const selectedFreq = parseFloat(targetNoteSelect.value);
+            const selectedNoteName = targetNoteSelect.options[targetNoteSelect.selectedIndex].textContent;
+
+            currentTargetFrequency = selectedFreq;
+            currentTargetNote = selectedNoteName;
+            targetNoteDisplay.textContent = selectedNoteName;
+            pitchesDetectedCents = []; // Reset for new target note
+
+            oscillatorNode = audioContext.createOscillator();
+            oscillatorNode.frequency.setValueAtTime(selectedFreq, audioContext.currentTime);
+            oscillatorNode.type = 'sine'; // Sine wave is a pure tone
+
+            // Create a gain node to control volume
+            const gainNode = audioContext.createGain();
+            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime); // Set volume (0.0 to 1.0)
+
+            oscillatorNode.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+
+            oscillatorNode.start();
+            oscillatorNode.stop(audioContext.currentTime + 1.5); // Play for 1.5 seconds
+        }
+
+        // --- Vocal Range Test Logic ---
+        startRangeTestButton.addEventListener('click', () => {
+            if (!audioContext || audioContext.state !== 'running') {
+                statusDisplay.textContent = "Please start microphone first.";
+                return;
+            }
+            isRangeTestActive = true;
+            minDetectedFrequency = Infinity;
+            maxDetectedFrequency = 0;
+            lowestNoteDisplay.textContent = '-';
+            highestNoteDisplay.textContent = '-';
+            vocalRangeDisplay.textContent = '-';
+            startRangeTestButton.disabled = true;
+            stopRangeTestButton.disabled = false;
+            feedbackDisplay.textContent = 'Sing your lowest note, then your highest...';
+            feedbackDisplay.style.color = '#555';
+        });
+
+        stopRangeTestButton.addEventListener('click', () => {
+            isRangeTestActive = false;
+            startRangeTestButton.disabled = false;
+            stopRangeTestButton.disabled = true;
+            feedbackDisplay.textContent = 'Range test complete.';
+            feedbackDisplay.style.color = '#007bff';
+        });
+
+        // Initialize note select on page load
+        document.addEventListener('DOMContentLoaded', populateTargetNoteSelect);
+
+    </script>
+</body>
+</html>
